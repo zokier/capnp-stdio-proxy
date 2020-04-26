@@ -1,11 +1,16 @@
 #include <signal.h>
 #include <kj/compat/http.h>
 #include <kj/async-io.h>
+#include <kj/memory.h>
+#include <capnp/compat/http-over-capnp.h>
+#include <capnp/ez-rpc.h>
+
 char msg[] = "hello world\n";
 
 class HelloService : public kj::HttpService {
 	virtual kj::Promise<void> request(kj::HttpMethod, kj::StringPtr, const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response&);
 };
+
 kj::Promise<void> HelloService::request(kj::HttpMethod, kj::StringPtr, const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response& response) {
 	auto headerTableBuilder = kj::HttpHeaderTable::Builder();
 	auto contentType = headerTableBuilder.add("Content-type");
@@ -17,16 +22,15 @@ kj::Promise<void> HelloService::request(kj::HttpMethod, kj::StringPtr, const kj:
 }
 
 int main(int,char**) {
-	auto asyncIo = kj::setupAsyncIo();
-	auto& timer = asyncIo.provider->getTimer();
-	HelloService service;
-	auto headerTable = kj::HttpHeaderTable::Builder().build();
-	kj::HttpServer server(timer, *headerTable, service);
-	auto listener = asyncIo.provider->getNetwork().parseAddress("127.0.0.1", 8080).then(
-			[](kj::Own<kj::NetworkAddress> addr)
-			{
-				return addr->listen();
-			})
-	.wait(asyncIo.waitScope);
-	server.listenHttp(*listener).wait(asyncIo.waitScope);
+	kj::Own<HelloService> service = kj::heap<HelloService>();
+	kj::HttpHeaderTable::Builder headerTableBuilder;
+	capnp::ByteStreamFactory streamFactory;
+	capnp::HttpOverCapnpFactory hocFactory(streamFactory, headerTableBuilder);
+	auto serviceClient = hocFactory.kjToCapnp(service.downcast<kj::HttpService>());
+
+	capnp::EzRpcServer server(serviceClient, "127.0.0.1", 5923);
+	auto& waitScope = server.getWaitScope();
+
+	// Run forever, accepting connections and handling requests.
+	kj::NEVER_DONE.wait(waitScope);
 }
