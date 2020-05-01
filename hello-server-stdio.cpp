@@ -9,21 +9,25 @@
 
 #include "combinationstream.h"
 
-char hello_msg[] = "hello world\n";
+const char hello_msg[] = "hello world\n";
 
 class HelloService : public kj::HttpService {
 public:
+	HelloService(kj::Own<kj::PromiseFulfiller<void>> fulfiller) : fulfiller(kj::mv(fulfiller)) {}
 	virtual kj::Promise<void> request(kj::HttpMethod, kj::StringPtr, const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response&);
 private:
 	kj::Promise<void> get_hello(const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response&);
 	kj::Promise<void> get_exit(const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response&);
+	kj::Own<kj::PromiseFulfiller<void>> fulfiller;
 
 };
 
 kj::Promise<void> HelloService::get_exit(const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response& response) {
 	auto headerTable = kj::HttpHeaderTable::Builder().build();
 	kj::HttpHeaders headers(*headerTable);
-	return response.sendError(200, "OK", headers).then([](){exit(0);});
+	return response.sendError(200, "OK", headers).then([&]() {
+		this->fulfiller->fulfill();
+	});
 }
 
 kj::Promise<void> HelloService::get_hello(const kj::HttpHeaders&, kj::AsyncInputStream&, kj::HttpService::Response& response) {
@@ -51,7 +55,8 @@ kj::Promise <void> HelloService::request(kj::HttpMethod method, kj::StringPtr ur
 }
 
 int main(int,char**) {
-	kj::Own<HelloService> service = kj::heap<HelloService>();
+	auto promiseAndFulfiller = kj::newPromiseAndFulfiller<void>();
+	kj::Own<HelloService> service = kj::heap<HelloService>(kj::mv(promiseAndFulfiller.fulfiller));
 	kj::HttpHeaderTable::Builder headerTableBuilder;
 	capnp::ByteStreamFactory streamFactory;
 	capnp::HttpOverCapnpFactory hocFactory(streamFactory, headerTableBuilder);
@@ -66,6 +71,6 @@ int main(int,char**) {
 	capnp::TwoPartyVatNetwork network(stream, capnp::rpc::twoparty::Side::SERVER);
 	auto server = makeRpcServer(network, serviceClient);
 
-	// Run forever, accepting connections and handling requests.
-	kj::NEVER_DONE.wait(asyncIo.waitScope);
+	// Run until /exit endpoint called
+	promiseAndFulfiller.promise.wait(asyncIo.waitScope);
 }
