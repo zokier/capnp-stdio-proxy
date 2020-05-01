@@ -13,8 +13,27 @@
 
 #include "combinationstream.h"
 
+class LoggingErrorHandler : public kj::TaskSet::ErrorHandler {
+public:
+	virtual void taskFailed(kj::Exception&& exception) {
+		printf("error\n");
+	}
+};
+
 void proxy_main(int childIn, int childOut, pid_t childPid) {
 	auto asyncIo = kj::setupAsyncIo();
+	LoggingErrorHandler errorHandler;
+	kj::TaskSet taskSet(errorHandler);
+
+	auto pipeThread = asyncIo.provider->newPipeThread(
+		[childPid](kj::AsyncIoProvider& provider, kj::AsyncIoStream& stream, kj::WaitScope& scope) {
+			int childStatus = 0;
+			waitpid(childPid, &childStatus, 0);
+			char buf[sizeof(int)];
+			memcpy(buf, &childStatus, sizeof(int));
+			stream.write(buf, sizeof(int)).wait(scope);
+		}
+	);
 
 	auto input = asyncIo.lowLevelProvider->wrapInputFd(childOut);
 	auto output = asyncIo.lowLevelProvider->wrapOutputFd(childIn);
@@ -37,12 +56,23 @@ void proxy_main(int childIn, int childOut, pid_t childPid) {
 			return addr->listen();
 			})
 	.wait(asyncIo.waitScope);
-	server.listenHttp(*listener).wait(asyncIo.waitScope);
-	// TODO above wait never returns so below code is never executed
-	int childStatus = 0;
-	waitpid(childPid, &childStatus, 0);
-	printf("childStatus: %d\n", childStatus);
-	server.drain().wait(asyncIo.waitScope);
+
+	taskSet.add(pipeThread.pipe->readAllBytes().then([&server,&taskSet](kj::Array<kj::byte> buf) -> kj::Promise<void> {
+		if (buf.size() != sizeof(int)) {
+			printf("unexpected buf len: %lu\n", buf.size());
+			return kj::READY_NOW;
+		}
+		int childStatus = 0;
+		//this memcpy maybe ub???
+		memcpy(&childStatus, buf.begin(), sizeof(int));
+		printf("childStatus: %d\n", childStatus);
+		return server.drain();
+	}).eagerlyEvaluate(nullptr));
+
+	taskSet.add(server.listenHttp(*listener));
+
+	taskSet.onEmpty().wait(asyncIo.waitScope);
+	printf("taskset returned\n");
 }
 
 int main(int argc, char** argv) {
